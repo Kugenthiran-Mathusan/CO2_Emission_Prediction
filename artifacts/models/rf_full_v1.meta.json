@@ -1,0 +1,22 @@
+{
+  "model_name": "RandomForestRegressor",
+  "feature_set": "FULL",
+  "features": [
+    "Engine Size(L)",
+    "Cylinders",
+    "Make",
+    "Vehicle Class",
+    "Transmission",
+    "Fuel Type",
+    "Fuel Consumption Comb (L/100 km)"
+  ],
+  "target": "CO2 Emissions(g/km)",
+  "metrics_holdout": {
+    "MAE": 2.2151191005773554,
+    "MSE": 16.10555846601273,
+    "RMSE": 4.013173116875564,
+    "R2": 0.9955370461773102
+  },
+  "notes": "Baseline RF selected via 5-fold CV; tuning did not improve.",
+  "version": "v1"
+}
