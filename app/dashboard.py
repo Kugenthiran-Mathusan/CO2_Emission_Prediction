@@ -122,9 +122,6 @@ def app_header():
         """
         <div class="card">
           <h1 style="margin:0;">🚗 CO₂ Vehicle Risk Platform</h1>
-          <p style="margin:8px 0 0 0; opacity:0.85;">
-            Choose values from dropdowns (no spelling issues) + set your own CO₂ limit → predict emissions → get risk score, PASS/AT_RISK/FAIL, and clear reasons.
-          </p>
         </div>
         """,
         unsafe_allow_html=True
