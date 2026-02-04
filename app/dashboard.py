@@ -1,9 +1,18 @@
 # app/dashboard.py
-import requests
-import streamlit as st
-import pandas as pd
+# Streamlit Cloud version (NO FastAPI calls) -> loads joblib models locally and predicts directly
 
-API_BASE = ""
+import sys
+from pathlib import Path
+
+# ---- Make "src/" importable when running `streamlit run app/dashboard.py`
+ROOT_DIR = Path(__file__).resolve().parents[1]
+sys.path.append(str(ROOT_DIR))
+
+import joblib
+import pandas as pd
+import streamlit as st
+
+from src.risk.risk_scoring import risk_category_from_co2, risk_score_from_co2, generate_reasons
 
 # ---------- Page config ----------
 st.set_page_config(
@@ -86,6 +95,19 @@ section[data-testid="stSidebar"] {
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
+# ---------- Load models (cached) ----------
+ARTIFACTS = ROOT_DIR / "artifacts" / "models"
+
+@st.cache_resource
+def load_models():
+    strict_path = ARTIFACTS / "rf_strict_v1.joblib"
+    full_path = ARTIFACTS / "rf_full_v1.joblib"
+    strict_model = joblib.load(strict_path)
+    full_model = joblib.load(full_path)
+    return strict_model, full_model
+
+STRICT_MODEL, FULL_MODEL = load_models()
+
 # ---------- Helpers ----------
 def badge_html(compliance: str) -> str:
     c = (compliance or "").upper()
@@ -94,19 +116,6 @@ def badge_html(compliance: str) -> str:
     if c == "AT_RISK":
         return '<span class="badge badge-risk">AT RISK</span>'
     return '<span class="badge badge-fail">FAIL</span>'
-
-
-def call_predict_strict(payload: dict, limit: float):
-    r = requests.post(f"{API_BASE}/predict/strict", params={"limit": limit}, json=payload, timeout=20)
-    r.raise_for_status()
-    return r.json()
-
-
-def call_predict_full(payload: dict, limit: float):
-    r = requests.post(f"{API_BASE}/predict/full", params={"limit": limit}, json=payload, timeout=20)
-    r.raise_for_status()
-    return r.json()
-
 
 def app_header():
     st.markdown(
@@ -121,12 +130,45 @@ def app_header():
         unsafe_allow_html=True
     )
 
+def build_strict_df(make, vehicle_class, transmission, fuel_type_code, engine_size, cylinders):
+    return pd.DataFrame([{
+        "Make": make,
+        "Vehicle Class": vehicle_class,
+        "Transmission": transmission,
+        "Fuel Type": fuel_type_code,
+        "Engine Size(L)": float(engine_size),
+        "Cylinders": int(cylinders),
+    }])
+
+def build_full_df(make, vehicle_class, transmission, fuel_type_code, engine_size, cylinders, fuel_comb):
+    return pd.DataFrame([{
+        "Make": make,
+        "Vehicle Class": vehicle_class,
+        "Transmission": transmission,
+        "Fuel Type": fuel_type_code,
+        "Engine Size(L)": float(engine_size),
+        "Cylinders": int(cylinders),
+        "Fuel Consumption Comb (L/100 km)": float(fuel_comb),
+    }])
+
+def predict_and_decide(df: pd.DataFrame, model, mode: str, limit: float, model_name: str):
+    co2_pred = float(model.predict(df)[0])
+    row_dict = df.iloc[0].to_dict()
+
+    return {
+        "model": model_name,
+        "co2_pred_g_km": round(co2_pred, 2),
+        "risk_score": risk_score_from_co2(co2_pred, limit),
+        "compliance": risk_category_from_co2(co2_pred, limit),
+        "reasons": generate_reasons(row_dict, mode=mode),
+        "limit_g_km": float(limit),
+    }
 
 # ---------- Header ----------
 app_header()
 st.write("")
 
-# ---------- Sidebar (only what you want) ----------
+# ---------- Sidebar (only model + limit) ----------
 with st.sidebar:
     st.markdown("### ⚙️ Controls")
 
@@ -157,19 +199,22 @@ MAKE_OPTIONS = [
 
 VEHICLE_CLASS_OPTIONS = [
     "COMPACT", "MID-SIZE", "FULL-SIZE",
+    "SUBCOMPACT", "TWO-SEATER",
     "SUV - SMALL", "SUV - STANDARD",
     "PICKUP TRUCK - SMALL", "PICKUP TRUCK - STANDARD",
-    "VAN - PASSENGER"
+    "VAN - PASSENGER", "VAN - CARGO",
+    "MINIVAN", "STATION WAGON - SMALL", "STATION WAGON - MID-SIZE"
 ]
 
 TRANSMISSION_OPTIONS = [
-    "A5", "A6", "A7", "A8",
-    "AS5", "AS6", "AS7", "AS8",
-    "M5", "M6", "AM7",
+    "A4", "A5", "A6", "A7", "A8", "A9", "A10",
+    "AS4", "AS5", "AS6", "AS7", "AS8", "AS9", "AS10",
+    "M4", "M5", "M6", "M7",
+    "AM5", "AM6", "AM7",
     "AV", "CVT"
 ]
 
-# Friendly fuel labels -> model codes
+# Friendly fuel labels -> model codes (user never sees codes)
 FUEL_TYPE_UI_TO_CODE = {
     "Regular Gasoline": "X",
     "Premium Gasoline": "Z",
@@ -177,7 +222,6 @@ FUEL_TYPE_UI_TO_CODE = {
     "Ethanol (E85)": "E",
     "Natural Gas": "N"
 }
-
 
 # ---------- TAB 1: Single prediction ----------
 with tab1:
@@ -225,7 +269,7 @@ with tab1:
                 help="Higher value = more CO₂"
             )
 
-        # small sanity warnings (optional, but professional)
+        # small sanity warnings (professional touch)
         if engine_size > 6.0:
             st.warning("⚠️ Engine size is very high. Please double-check.")
         if model_mode.startswith("FULL") and fuel_comb is not None and fuel_comb < 3.0:
@@ -241,26 +285,11 @@ with tab1:
         if predict_btn:
             try:
                 if model_mode.startswith("STRICT"):
-                    payload = {
-                        "Make": make,
-                        "Vehicle_Class": vehicle_class,
-                        "Transmission": transmission,
-                        "Fuel_Type": fuel_type,
-                        "Engine_Size_L": float(engine_size),
-                        "Cylinders": int(cylinders)
-                    }
-                    res = call_predict_strict(payload, limit=vehicle_limit)
+                    df = build_strict_df(make, vehicle_class, transmission, fuel_type, engine_size, cylinders)
+                    res = predict_and_decide(df, STRICT_MODEL, mode="STRICT", limit=vehicle_limit, model_name="rf_strict_v1")
                 else:
-                    payload = {
-                        "Make": make,
-                        "Vehicle_Class": vehicle_class,
-                        "Transmission": transmission,
-                        "Fuel_Type": fuel_type,
-                        "Engine_Size_L": float(engine_size),
-                        "Cylinders": int(cylinders),
-                        "Fuel_Consumption_Comb_L_100km": float(fuel_comb)
-                    }
-                    res = call_predict_full(payload, limit=vehicle_limit)
+                    df = build_full_df(make, vehicle_class, transmission, fuel_type, engine_size, cylinders, fuel_comb)
+                    res = predict_and_decide(df, FULL_MODEL, mode="FULL", limit=vehicle_limit, model_name="rf_full_v1")
 
                 c1, c2, c3 = st.columns(3)
                 with c1:
@@ -302,7 +331,7 @@ with tab1:
                 st.caption(f'Model used: **{res["model"]}** | Your Limit: **{res["limit_g_km"]} g/km**')
 
             except Exception as e:
-                st.error(f"API error: {e}")
+                st.error(f"Prediction error: {e}")
         else:
             st.info("Select details and click **Predict CO₂ & Risk**.")
         st.markdown("</div>", unsafe_allow_html=True)
@@ -325,59 +354,60 @@ with tab2:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown("### 📄 Upload CSV")
 
-    st.caption("Required columns (STRICT): Make, Vehicle_Class, Transmission, Fuel_Type, Engine_Size_L, Cylinders")
-    st.caption("Extra column for FULL: Fuel_Consumption_Comb_L_100km")
-    st.caption("Fuel_Type in CSV should be a code: X/Z/D/E/N (we can add friendly upload later).")
+    st.caption("Required columns (STRICT): Make, Vehicle Class, Transmission, Fuel Type, Engine Size(L), Cylinders")
+    st.caption("Extra column for FULL: Fuel Consumption Comb (L/100 km)")
+    st.caption("Fuel Type must be code: X/Z/D/E/N (same as model).")
 
     file = st.file_uploader("Upload CSV", type=["csv"])
 
     if file is not None:
-        df = pd.read_csv(file)
+        df_in = pd.read_csv(file)
         st.markdown("### Preview")
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(df_in, use_container_width=True)
 
         run_btn = st.button("Run Batch Predictions")
 
         if run_btn:
-            outputs = []
-            for _, row in df.iterrows():
-                try:
-                    base = {
-                        "Make": str(row["Make"]),
-                        "Vehicle_Class": str(row["Vehicle_Class"]),
-                        "Transmission": str(row["Transmission"]),
-                        "Fuel_Type": str(row["Fuel_Type"]),  # expects code
-                        "Engine_Size_L": float(row["Engine_Size_L"]),
-                        "Cylinders": int(row["Cylinders"]),
-                    }
+            try:
+                out_df = df_in.copy()
 
-                    if model_mode.startswith("FULL") and "Fuel_Consumption_Comb_L_100km" in df.columns:
-                        base["Fuel_Consumption_Comb_L_100km"] = float(row["Fuel_Consumption_Comb_L_100km"])
-                        res = call_predict_full(base, limit=vehicle_limit)
+                # Decide which model to use
+                if model_mode.startswith("FULL"):
+                    required = [
+                        "Make", "Vehicle Class", "Transmission", "Fuel Type",
+                        "Engine Size(L)", "Cylinders", "Fuel Consumption Comb (L/100 km)"
+                    ]
+                    missing = [c for c in required if c not in out_df.columns]
+                    if missing:
+                        st.error(f"Missing columns for FULL mode: {missing}")
                     else:
-                        res = call_predict_strict(base, limit=vehicle_limit)
+                        preds = FULL_MODEL.predict(out_df[required])
+                        out_df["co2_pred_g_km"] = [round(float(x), 2) for x in preds]
+                else:
+                    required = ["Make", "Vehicle Class", "Transmission", "Fuel Type", "Engine Size(L)", "Cylinders"]
+                    missing = [c for c in required if c not in out_df.columns]
+                    if missing:
+                        st.error(f"Missing columns for STRICT mode: {missing}")
+                    else:
+                        preds = STRICT_MODEL.predict(out_df[required])
+                        out_df["co2_pred_g_km"] = [round(float(x), 2) for x in preds]
 
-                    outputs.append({
-                        **base,
-                        "co2_pred_g_km": res["co2_pred_g_km"],
-                        "risk_score": res["risk_score"],
-                        "decision": res["compliance"],
-                        "model": res["model"],
-                    })
-                except Exception as e:
-                    out = row.to_dict()
-                    out["error"] = str(e)
-                    outputs.append(out)
+                if "co2_pred_g_km" in out_df.columns:
+                    # Risk score + decision
+                    out_df["risk_score"] = out_df["co2_pred_g_km"].apply(lambda x: risk_score_from_co2(float(x), float(vehicle_limit)))
+                    out_df["decision"] = out_df["co2_pred_g_km"].apply(lambda x: risk_category_from_co2(float(x), float(vehicle_limit)))
 
-            out_df = pd.DataFrame(outputs)
-            st.markdown("### ✅ Results")
-            st.dataframe(out_df, use_container_width=True)
+                    st.markdown("### ✅ Results")
+                    st.dataframe(out_df, use_container_width=True)
 
-            st.download_button(
-                label="Download Results CSV",
-                data=out_df.to_csv(index=False).encode("utf-8"),
-                file_name="fleet_co2_risk_results.csv",
-                mime="text/csv"
-            )
+                    st.download_button(
+                        label="Download Results CSV",
+                        data=out_df.to_csv(index=False).encode("utf-8"),
+                        file_name="fleet_co2_risk_results.csv",
+                        mime="text/csv"
+                    )
+
+            except Exception as e:
+                st.error(f"Batch prediction error: {e}")
 
     st.markdown("</div>", unsafe_allow_html=True)
