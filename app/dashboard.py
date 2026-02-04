@@ -3,7 +3,7 @@ import requests
 import streamlit as st
 import pandas as pd
 
-API_BASE = "http://127.0.0.1:8000"
+API_BASE = ""
 
 # ---------- Page config ----------
 st.set_page_config(
